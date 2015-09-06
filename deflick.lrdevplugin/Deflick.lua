@@ -26,6 +26,36 @@ local function convertToEV(value)
     return evCurveCoefficent * math.log(value);
 end
 
+local function maxLuminance(r,g,b)
+  if r > g and r > b then return r
+  elseif g > b then return b
+  else return b end
+end
+
+local function percievedFastLuminance(r,g,b)
+  return math.floor(0.299 * r + 0.587 * g + 0.114 * b)
+end
+
+local function percievedSlowLuminance(r,g,b)
+  return math.floor(math.sqrt(0.299 * r * r + 0.587 * g * g + 0.114 * b * b))
+end
+
+local function standardLuminance(r,g,b)
+  return math.floor(0.2126 * r + 0.7152 * g + 0.0722 * b)
+end
+
+local function redLuminance(r,g,b)
+  return r
+end
+
+local function greenLuminance(r,g,b)
+  return g
+end
+
+local function blueLuminance(r,g,b)
+  return b
+end
+
 local function decodeJpeg(data)
     local f = io.open(tempFile, "w+")
     f:write(data)
@@ -47,15 +77,17 @@ local function decodeJpeg(data)
 end
 
 local function computeHistogram(data)
+  local luminance = standardLuminance
   local histogram = {}
   for i = 1, 256, 1 do
     histogram[i] = 0
   end
-  for i = 1, #data, 1 do
-    local val = data:byte(i) + 1
+  for i = 1, #data - 2, 3 do
+    local val = luminance(data:byte(i), data:byte(i + 1), data:byte(i + 2)) + 1
+    if val > 256 then val = 256 end
     histogram[val] = histogram[val] + 1
   end
-  return histogram, #data
+  return histogram, #data / 3
 end
 
 local function computePercentile(histogram, total, percentile)
@@ -64,96 +96,109 @@ local function computePercentile(histogram, total, percentile)
   for i = 1, 256, 1 do
     current = current + histogram[i]
     if current > stopAt then
-      return i
+      return i - 1
     end
   end
+  return 255
 end
 
-local function analyze(photo)
-  local done = false
-  local error = false
-  while done == false do
+local function analyze(photo, progress)
+  local median = nil
+  local requestError = nil
+  while median == nil do
     print("requesting: "..photo:getFormattedMetadata("fileName"))
     local thumb = photo:requestJpegThumbnail(200, 200, function(data, errorMsg)
       if data == nil then
         print(errorMsg)
-        error = true
-      elseif done == false then
+        requestError = errorMsg
+      else
         print("processing: "..photo:getFormattedMetadata("fileName"))
         local histogram, total = computeHistogram(decodeJpeg(data))
-        photo.deflickMedian = computePercentile(histogram, total, 50)
-        print(photo:getFormattedMetadata("fileName").." median: "..tostring(photo.deflickMedian))
-        done = true
+        median = computePercentile(histogram, total, 50)
+        print(photo:getFormattedMetadata("fileName").." median: "..tostring(median))
       end
     end)
     local timeout = 0
-    while done == false do
+    while median == nil do
       LrTasks.sleep(0.01)
       timeout = timeout + 1
-      if progress:isCanceled() then return end
+      if progress:isCanceled() then error("Deflicker Canceled") end
       if timeout >= 40 then break end
-      if error then break end
+      if requestError ~= nil then break end
     end
     thumb = nil
+  end
+  if median ~= nil then 
+    return median
+  else
+    local msg = "Analysis Failed: "..photo:getFormattedMetadata("fileName")
+    if requestError ~= nil then
+      msg = msg.."\n"..tostring(requestError)
+    end
+    error(msg)
   end
 end
 
 local function deflick(context)
   LrDialogs.attachErrorDialogToFunctionContext(context)
-  local progress = LrProgressScope { title="Deflick", functionContext = context }
+  assert(LrApplicationView.getCurrentModuleName() == "develop", "Deflick only works in 'Develop")
   local cat = LrApplication.activeCatalog();
   local selection = cat:getTargetPhotos();
   local count = #selection
-  local max_iterations = 10
+  local max_iterations = 20
   assert(count > 2, "Not enough photos selected")
   
-  analyze(selection[1])
-  local startMedian = selection[1].deflickMedian
-  analyze(selection[#selection])
-  local endMedian = selection[#selection].deflickMedian
+  local progress = LrProgressScope { title="Deflick", functionContext = context }
   
-  for iteration = 1, max_iterations, 1 do
-    print("Iteration: "..tostring(iteration))
-    local moreIterationsNeeded = false
-    for i,photo in ipairs(selection) do
-      if i ~= 1 and i ~= count and photo.done ~= true then
-        analyze(photo)
-        progress:setPortionComplete(count * 2 * (iteration - 1) + i, count * 2 * max_iterations)
-      end
-    end
-    print("Applying exposure corrections...")
-    for i,photo in ipairs(selection) do
-      if i ~= 1 and i ~= count then
-        local offset = photo:getDevelopSettings().Exposure
-        if offset == nil then offset = 0 end
-        photo.offset = offset
-      end
-    end
-    LrApplicationView.switchToModule("develop")
-    for i,photo in ipairs(selection) do
-      if i ~= 1 and i ~= count and photo.done ~= true then
-        local target = startMedian + (endMedian - startMedian) * (i / count)
-        if math.abs(target - photo.deflickMedian) > deflickerThreshold then
-          moreIterationsNeeded = true
-          cat:setSelectedPhotos(photo,{})
-          LrTasks.sleep(0.2)
-          local offset = LrDevelopController.getValue("Exposure")
-          if offset == nil then offset = 0 end
-          local target = startMedian + (endMedian - startMedian) * (i / count)
-          local ev = convertToEV(target) - convertToEV(photo.deflickMedian) + offset
-          print(photo:getFormattedMetadata("fileName").." Exposure (ev): "..tostring(offset).." -> "..tostring(ev))
-          LrDevelopController.setValue("Exposure", ev)
-          progress:setPortionComplete(count * 2 * (iteration - 1) + count + i, count * 2 * max_iterations)
-        else
-          photo.done = true
+  local startMedian = analyze(selection[1], progress)
+  progress:setPortionComplete(1, count)
+  
+  local endMedian = analyze(selection[#selection], progress)
+  progress:setPortionComplete(2, count)
+  
+  for i,photo in ipairs(selection) do
+    if i ~= 1 and i ~= count then
+      local lastComputed = -1
+      cat:setSelectedPhotos(photo,{})
+      local target = startMedian + (endMedian - startMedian) * (i / count)
+      for iteration = 1, max_iterations, 1 do
+        print("Iteration: "..tostring(iteration))
+        local computed = analyze(photo, progress)
+        --if the median doesn't change, we might need to try again
+        local maxRetry = 10
+        while computed == lastComputed and maxRetry > 0 do
+          LrTasks.sleep(0.1)
+          computed = analyze(photo, progress)
+          maxRetry = maxRetry - 1
         end
+        --if the median still doesn't change, don't try to change exposure
+        if computed ~= lastComputed then
+          lastComputed = computed
+          if math.abs(target - computed) > deflickerThreshold then
+            local offset = nil
+            maxRetry = 10
+            while offset == nil and maxRetry > 0 do
+              LrTasks.sleep(0.1)
+              offset = LrDevelopController.getValue("Exposure")
+              maxRetry = maxRetry - 1
+            end
+            if offset == nil then offset = 0 end
+            local target = startMedian + (endMedian - startMedian) * (i / count)
+            local ev = convertToEV(target) - convertToEV(computed) + offset
+            print(photo:getFormattedMetadata("fileName").." Exposure (ev): "..tostring(offset).." -> "..tostring(ev))
+            LrDevelopController.setValue("Exposure", ev)
+          else
+            break
+          end
+        end
+        if progress:isCanceled() then error("Deflicker Canceled") end
       end
     end
-    LrApplicationView.switchToModule("library")
-    --restore selection
-    cat:setSelectedPhotos(selection[1],selection)
-    if moreIterationsNeeded == false then break end
+    progress:setPortionComplete(i + 1, count)
   end
+  
+  --restore selection
+  cat:setSelectedPhotos(selection[1],selection)
   progress:done()
   print("deflick finished")
 end
