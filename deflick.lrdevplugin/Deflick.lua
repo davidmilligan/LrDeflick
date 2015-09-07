@@ -146,13 +146,13 @@ local function analyze(photo, progress)
   local median = nil
   local requestError = nil
   while median == nil do
-    print("requesting: "..photo:getFormattedMetadata("fileName"))
+    print(photo:getFormattedMetadata("fileName").." requesting...")
     local thumb = photo:requestJpegThumbnail(200, 200, function(data, errorMsg)
       if data == nil then
         print(errorMsg)
         requestError = errorMsg
       else
-        print("processing: "..photo:getFormattedMetadata("fileName"))
+        print(photo:getFormattedMetadata("fileName").." processing...")
         local histogram, total = computeHistogram(decodeJpeg(data))
         median = computePercentile(histogram, total, percentile)
         print(photo:getFormattedMetadata("fileName")..": "..tostring(median))
@@ -205,7 +205,6 @@ local function deflick(context)
       for iteration = 1, max_iterations, 1 do
         print("Iteration: "..tostring(iteration))
         local computed = analyze(photo, progress)
-        print(photo:getFormattedMetadata("fileName").." Correction: "..tostring(computed).." -> "..tostring(target))
         --if the computed doesn't change, we might need to try again
         local maxRetry = 10
         while computed == lastComputed and maxRetry > 0 do
@@ -215,6 +214,7 @@ local function deflick(context)
         end
         --if the computed still doesn't change, don't try to change exposure
         if computed ~= lastComputed then
+          print(photo:getFormattedMetadata("fileName").." Correction: "..tostring(computed).." -> "..tostring(target))
           lastComputed = computed
           if math.abs(target - computed) > deflickerThreshold then
             local offset = nil
