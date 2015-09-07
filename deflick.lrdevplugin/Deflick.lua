@@ -32,6 +32,7 @@ local LrShell = import 'LrShell'
 local LrTasks = import 'LrTasks'
 
 local djpeg = LrPathUtils.child(_PLUGIN.path, "djpeg")
+if WIN_ENV then djpeg = LrPathUtils.child(_PLUGIN.path, "djpeg.exe") end
 local tempFile = LrPathUtils.child(_PLUGIN.path, "temp.jpg")
 local evCurveCoefficent = 2 / math.log(2)
 
