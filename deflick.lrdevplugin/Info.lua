@@ -24,6 +24,7 @@ return
 	LrSdkMinimumVersion = 6.0,
 	LrToolkitIdentifier = 'org.ml.deflick',
 	LrPluginName = LOC "$$$/Deflick/PluginName=LrDeflick",
+	LrPluginInfoUrl = "https://github.com/davidmilligan/LrDeflick",
 	LrExportMenuItems = 
 	{
 		title = "Run Deflicker",

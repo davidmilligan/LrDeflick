@@ -182,7 +182,7 @@ end
 local function deflick(context)
   print("deflick started")
   LrDialogs.attachErrorDialogToFunctionContext(context)
-  assert(LrApplicationView.getCurrentModuleName() == "develop", "Deflick only works in 'Develop")
+  assert(LrApplicationView.getCurrentModuleName() == "develop", "Deflick only works in 'Develop'")
   local cat = LrApplication.activeCatalog();
   local selection = cat:getTargetPhotos();
   local count = #selection
