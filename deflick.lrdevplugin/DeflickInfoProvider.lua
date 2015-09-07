@@ -56,7 +56,6 @@ function DeflickInfoProvider.sectionsForTopOfDialog(viewFactory, propertyTable)
             { title = "Blue Channel", value = 7 },
           },
           value = bind { key = 'luminanceMethod', object = prefs },
-          size = 'small' 
         }
       },
       viewFactory:row
@@ -74,7 +73,8 @@ function DeflickInfoProvider.sectionsForTopOfDialog(viewFactory, propertyTable)
         {
           value = bind { key = 'percentile', object = prefs },
           min = 0,
-          max = 100 
+          max = 100,
+          width_in_digits = 4
         }
       },
       viewFactory:row
@@ -93,7 +93,8 @@ function DeflickInfoProvider.sectionsForTopOfDialog(viewFactory, propertyTable)
           tooltip = LOC "$$$/Deflick/Settings/tooltip/threshold=How close the histogram percentile must be to the target value (low values => slower, better deflicker; high values => faster, worse deflicker)",
           value = bind { key = 'deflickerThreshold', object = prefs },
           min = 1,
-          max = 128
+          max = 16,
+          width_in_digits = 3
         }
       }
     }
