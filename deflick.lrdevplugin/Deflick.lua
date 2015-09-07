@@ -104,9 +104,10 @@ local function decodeJpeg(data)
     --call djpeg (from libjpeg) to decode the jpeg to ppm format
     local ppm = io.popen(djpeg.." "..tempFile)
     local magic = ppm:read("*l")
-    assert(magic == "P6", "Unsupported PPM format")
+    assert(magic == "P6", "Unsupported PPM format -> Expected a binary RGB (P6)")
     local width = ppm:read("*n")
     local height = ppm:read("*n")
+    print("jpeg preview: "..tostring(#data).." bytes ("..tostring(width).." x "..tostring(height)..")")
     local depth = ppm:read("*n")
     assert(depth == 255, "Unsupported bit depth")
     --skip line return
@@ -122,12 +123,19 @@ local function computeHistogram(data)
   for i = 1, 256, 1 do
     histogram[i] = 0
   end
-  for i = 1, #data - 2, 3 do
+  local skip = 3
+  --if we get a huge image, skip some pixels
+  local pixels = #data
+  if     pixels > 10000000 then skip = 60
+  elseif pixels > 1000000 then skip = 30
+  elseif pixels > 100000 then skip = 15 end
+  
+  for i = 1, pixels - skip, skip do
     local val = luminance(data:byte(i), data:byte(i + 1), data:byte(i + 2)) + 1
     if val > 256 then val = 256 end
     histogram[val] = histogram[val] + 1
   end
-  return histogram, #data / 3
+  return histogram, pixels / skip
 end
 
 local function computePercentile(histogram, total, percentile)
@@ -143,19 +151,20 @@ local function computePercentile(histogram, total, percentile)
 end
 
 local function analyze(photo, progress)
+  local currentFilename = photo:getFormattedMetadata("fileName")
   local median = nil
   local requestError = nil
   while median == nil do
-    print(photo:getFormattedMetadata("fileName").." requesting...")
+    print(currentFilename.." requesting...")
     local thumb = photo:requestJpegThumbnail(200, 200, function(data, errorMsg)
       if data == nil then
         print(errorMsg)
         requestError = errorMsg
       else
-        print(photo:getFormattedMetadata("fileName").." processing...")
+        print(currentFilename.." processing...")
         local histogram, total = computeHistogram(decodeJpeg(data))
         median = computePercentile(histogram, total, percentile)
-        print(photo:getFormattedMetadata("fileName")..": "..tostring(median))
+        print(currentFilename..": "..tostring(median))
       end
     end)
     local timeout = 0
@@ -171,7 +180,7 @@ local function analyze(photo, progress)
   if median ~= nil then 
     return median
   else
-    local msg = "Analysis Failed: "..photo:getFormattedMetadata("fileName")
+    local msg = "Analysis Failed: "..currentFilename
     if requestError ~= nil then
       msg = msg.."\n"..tostring(requestError)
     end
@@ -182,14 +191,15 @@ end
 local function deflick(context)
   print("deflick started")
   LrDialogs.attachErrorDialogToFunctionContext(context)
-  assert(LrApplicationView.getCurrentModuleName() == "develop", "Deflick only works in 'Develop'")
-  local cat = LrApplication.activeCatalog();
-  local selection = cat:getTargetPhotos();
+  local catalog = LrApplication.activeCatalog();
+  local selection = catalog:getTargetPhotos();
   local count = #selection
   local max_iterations = 20
   assert(count > 2, "Not enough photos selected")
   
   local progress = LrProgressScope { title="Deflick", functionContext = context }
+  
+  LrApplicationView.switchToModule("develop")
   
   local startMedian = analyze(selection[1], progress)
   progress:setPortionComplete(1, count)
@@ -200,10 +210,11 @@ local function deflick(context)
   for i,photo in ipairs(selection) do
     if i ~= 1 and i ~= count then
       local lastComputed = -1
-      cat:setSelectedPhotos(photo,{})
+      local currentFilename = photo:getFormattedMetadata("fileName")
+      catalog:setSelectedPhotos(photo,{})
       local target = startMedian + (endMedian - startMedian) * (i / count)
       for iteration = 1, max_iterations, 1 do
-        print("Iteration: "..tostring(iteration))
+        print(currentFilename.." Iteration: "..tostring(iteration))
         local computed = analyze(photo, progress)
         --if the computed doesn't change, we might need to try again
         local maxRetry = 10
@@ -214,7 +225,7 @@ local function deflick(context)
         end
         --if the computed still doesn't change, don't try to change exposure
         if computed ~= lastComputed then
-          print(photo:getFormattedMetadata("fileName").." Correction: "..tostring(computed).." -> "..tostring(target))
+          print(currentFilename.." Correction: "..tostring(computed).." -> "..tostring(target))
           lastComputed = computed
           if math.abs(target - computed) > deflickerThreshold then
             local offset = nil
@@ -227,14 +238,14 @@ local function deflick(context)
             if offset == nil then offset = 0 end
             local target = startMedian + (endMedian - startMedian) * (i / count)
             local ev = convertToEV(target) - convertToEV(computed) + offset
-            print(photo:getFormattedMetadata("fileName").." Correction (ev): "..tostring(offset).." -> "..tostring(ev))
+            print(currentFilename.." Correction (ev): "..tostring(offset).." -> "..tostring(ev))
             LrDevelopController.setValue("Exposure", ev)
           else
-            print(photo:getFormattedMetadata("fileName").." Finished")
+            print(currentFilename.." Finished")
             break
           end
         else
-            print(photo:getFormattedMetadata("fileName").." Preview did not update, re-trying")
+            print(currentFilename.." Preview did not update, re-trying")
         end
         if progress:isCanceled() then LrErrors.throwCanceled() end
       end
@@ -243,7 +254,7 @@ local function deflick(context)
   end
   
   --restore selection
-  cat:setSelectedPhotos(selection[1],selection)
+  catalog:setSelectedPhotos(selection[1],selection)
   progress:done()
   print("deflick finished")
 end
