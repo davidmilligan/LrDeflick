@@ -18,21 +18,16 @@ Free Software Foundation, Inc.,
 Boston, MA  02110-1301, USA. 
 ----------------------------------------------------------------]]
 
-return 
-{	
-	LrSdkVersion = 6.0,
-	LrSdkMinimumVersion = 6.0,
-	LrToolkitIdentifier = 'org.ml.deflick',
-	LrPluginName = LOC "$$$/Deflick/PluginName=LrDeflick",
-	LrExportMenuItems = 
-	{
-		title = "Run Deflicker",
-		file = "Deflick.lua",
-	},
-	LrInitPlugin = 'DeflickInit.lua',
-	LrPluginInfoProvider = "DeflickInfoProvider.lua",
-	VERSION = { major=1, minor=0, revision=0, build=0, },
+local LrPrefs = import 'LrPrefs'
+
+local defaultPrefValues = 
+{
+  luminanceMethod = 1,
+  percentile = 50,
+  deflickerThreshold = 2
 }
 
-
-	
+local prefs = LrPrefs.prefsForPlugin(_PLUGIN.id)
+for k,v in pairs(defaultPrefValues) do
+  if prefs[k] == nil then prefs[k] = v end
+end

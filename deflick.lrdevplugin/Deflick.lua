@@ -22,9 +22,11 @@ local LrApplication = import 'LrApplication'
 local LrApplicationView = import 'LrApplicationView'
 local LrDevelopController = import 'LrDevelopController'
 local LrDialogs = import 'LrDialogs'
+local LrErrors = import 'LrErrors'
 local LrFunctionContext = import 'LrFunctionContext'
 local LrLogger = import 'LrLogger'
 local LrPathUtils = import 'LrPathUtils'
+local LrPrefs = import 'LrPrefs'
 local LrProgressScope = import 'LrProgressScope'
 local LrShell = import 'LrShell'
 local LrTasks = import 'LrTasks'
@@ -32,7 +34,6 @@ local LrTasks = import 'LrTasks'
 local djpeg = LrPathUtils.child(_PLUGIN.path, "djpeg")
 local tempFile = LrPathUtils.child(_PLUGIN.path, "temp.jpg")
 local evCurveCoefficent = 2 / math.log(2)
-local deflickerThreshold = 2
 
 local myLogger = LrLogger('exportLogger')
 myLogger:enable("print")
@@ -41,39 +42,60 @@ local function print( message )
   myLogger:trace( message )
 end
 
+--replace the default assert behavior to use LrErrors.throwUserError
+local assertOriginal = assert
+local function assert(condition, message)
+  if condition ~= true then
+    if message == nil then 
+      assertOriginal(condition)
+    else
+      LrErrors.throwUserError(message)
+    end
+  end
+end
+
 local function convertToEV(value)
     return evCurveCoefficent * math.log(value);
 end
 
-local function maxLuminance(r,g,b)
-  if r > g and r > b then return r
-  elseif g > b then return b
-  else return b end
-end
+local luminanceMethods = 
+{
+  --standard
+  function(r,g,b)
+    return math.floor(0.2126 * r + 0.7152 * g + 0.0722 * b)
+  end,
+  --percieved
+  function(r,g,b)
+    return math.floor(0.299 * r + 0.587 * g + 0.114 * b)
+  end,
+  --percieved slow
+  function(r,g,b)
+    return math.floor(math.sqrt(0.299 * r * r + 0.587 * g * g + 0.114 * b * b))
+  end,
+  --maximum
+  function(r,g,b)
+    if r > g and r > b then return r
+    elseif g > b then return b
+    else return b end
+  end,
+  --red channel
+  function(r,g,b)
+    return r
+  end,
+  --green channel
+  function(r,g,b)
+    return g
+  end,
+  --blue channel
+  function(r,g,b)
+    return b
+  end
+}
 
-local function percievedFastLuminance(r,g,b)
-  return math.floor(0.299 * r + 0.587 * g + 0.114 * b)
-end
-
-local function percievedSlowLuminance(r,g,b)
-  return math.floor(math.sqrt(0.299 * r * r + 0.587 * g * g + 0.114 * b * b))
-end
-
-local function standardLuminance(r,g,b)
-  return math.floor(0.2126 * r + 0.7152 * g + 0.0722 * b)
-end
-
-local function redLuminance(r,g,b)
-  return r
-end
-
-local function greenLuminance(r,g,b)
-  return g
-end
-
-local function blueLuminance(r,g,b)
-  return b
-end
+local prefs = LrPrefs.prefsForPlugin(_PLUGIN.id)
+local deflickerThreshold = prefs.deflickerThreshold
+local luminance = luminanceMethods[prefs.luminanceMethod]
+local percentile = prefs.percentile
 
 local function decodeJpeg(data)
     local f = io.open(tempFile, "w+")
@@ -96,7 +118,6 @@ local function decodeJpeg(data)
 end
 
 local function computeHistogram(data)
-  local luminance = standardLuminance
   local histogram = {}
   for i = 1, 256, 1 do
     histogram[i] = 0
@@ -133,15 +154,15 @@ local function analyze(photo, progress)
       else
         print("processing: "..photo:getFormattedMetadata("fileName"))
         local histogram, total = computeHistogram(decodeJpeg(data))
-        median = computePercentile(histogram, total, 50)
-        print(photo:getFormattedMetadata("fileName").." median: "..tostring(median))
+        median = computePercentile(histogram, total, percentile)
+        print(photo:getFormattedMetadata("fileName")..": "..tostring(median))
       end
     end)
     local timeout = 0
     while median == nil do
       LrTasks.sleep(0.01)
       timeout = timeout + 1
-      if progress:isCanceled() then error("Deflicker Canceled") end
+      if progress:isCanceled() then LrErrors.throwCanceled() end
       if timeout >= 40 then break end
       if requestError ~= nil then break end
     end
@@ -154,11 +175,12 @@ local function analyze(photo, progress)
     if requestError ~= nil then
       msg = msg.."\n"..tostring(requestError)
     end
-    error(msg)
+    LrErrors.throwUserError(msg)
   end
 end
 
 local function deflick(context)
+  print("deflick started")
   LrDialogs.attachErrorDialogToFunctionContext(context)
   assert(LrApplicationView.getCurrentModuleName() == "develop", "Deflick only works in 'Develop")
   local cat = LrApplication.activeCatalog();
@@ -183,14 +205,15 @@ local function deflick(context)
       for iteration = 1, max_iterations, 1 do
         print("Iteration: "..tostring(iteration))
         local computed = analyze(photo, progress)
-        --if the median doesn't change, we might need to try again
+        print(photo:getFormattedMetadata("fileName").." Correction: "..tostring(computed).." -> "..tostring(target))
+        --if the computed doesn't change, we might need to try again
         local maxRetry = 10
         while computed == lastComputed and maxRetry > 0 do
           LrTasks.sleep(0.1)
           computed = analyze(photo, progress)
           maxRetry = maxRetry - 1
         end
-        --if the median still doesn't change, don't try to change exposure
+        --if the computed still doesn't change, don't try to change exposure
         if computed ~= lastComputed then
           lastComputed = computed
           if math.abs(target - computed) > deflickerThreshold then
@@ -204,13 +227,16 @@ local function deflick(context)
             if offset == nil then offset = 0 end
             local target = startMedian + (endMedian - startMedian) * (i / count)
             local ev = convertToEV(target) - convertToEV(computed) + offset
-            print(photo:getFormattedMetadata("fileName").." Exposure (ev): "..tostring(offset).." -> "..tostring(ev))
+            print(photo:getFormattedMetadata("fileName").." Correction (ev): "..tostring(offset).." -> "..tostring(ev))
             LrDevelopController.setValue("Exposure", ev)
           else
+            print(photo:getFormattedMetadata("fileName").." Finished")
             break
           end
+        else
+            print(photo:getFormattedMetadata("fileName").." Preview did not update, re-trying")
         end
-        if progress:isCanceled() then error("Deflicker Canceled") end
+        if progress:isCanceled() then LrErrors.throwCanceled() end
       end
     end
     progress:setPortionComplete(i + 1, count)
