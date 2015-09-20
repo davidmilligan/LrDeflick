@@ -28,20 +28,16 @@ local LrLogger = import 'LrLogger'
 local LrPathUtils = import 'LrPathUtils'
 local LrPrefs = import 'LrPrefs'
 local LrProgressScope = import 'LrProgressScope'
-local LrShell = import 'LrShell'
 local LrTasks = import 'LrTasks'
 
+local max_iterations = 20
 local djpeg = LrPathUtils.child(_PLUGIN.path, "djpeg")
 if WIN_ENV then djpeg = LrPathUtils.child(_PLUGIN.path, "djpeg.exe") end
 local tempFile = LrPathUtils.child(_PLUGIN.path, "temp.jpg")
 local evCurveCoefficent = 2 / math.log(2)
 
-local myLogger = LrLogger('exportLogger')
-myLogger:enable("print")
-
-local function print( message )
-  myLogger:trace( message )
-end
+local log = LrLogger('exportLogger')
+log:enable("print")
 
 --replace the default assert behavior to use LrErrors.throwUserError
 local assertOriginal = assert
@@ -99,24 +95,24 @@ local luminance = luminanceMethods[prefs.luminanceMethod]
 local percentile = prefs.percentile
 
 local function decodeJpeg(data)
-    local f = io.open(tempFile, "w+")
-    f:write(data)
-    f:close()
-    --call djpeg (from libjpeg) to decode the jpeg to ppm format
-    local ppm = io.popen(djpeg.." "..tempFile)
-    local magic = ppm:read("*l")
-    assert(magic == "P6", "Unsupported PPM format -> Expected a binary RGB (P6)")
-    local width = ppm:read("*n")
-    local height = ppm:read("*n")
-    print("jpeg preview: "..tostring(#data).." bytes ("..tostring(width).." x "..tostring(height)..")")
-    local depth = ppm:read("*n")
-    assert(depth == 255, "Unsupported bit depth")
-    --skip line return
-    ppm:read("*l")
-    --read the data
-    local data = ppm:read("*a")
-    ppm:close()
-    return data, width, height
+  local f = io.open(tempFile, "w+")
+  f:write(data)
+  f:close()
+  --call djpeg (from libjpeg) to decode the jpeg to ppm format
+  local ppm = io.popen(djpeg.." "..tempFile)
+  local magic = ppm:read("*l")
+  assert(magic == "P6", "Unsupported PPM format -> Expected a binary RGB (P6)")
+  local width = ppm:read("*n")
+  local height = ppm:read("*n")
+  log:tracef("jpeg preview: %d bytes (%d x %d)", #data, width, height)
+  local depth = ppm:read("*n")
+  assert(depth == 255, "Unsupported bit depth")
+  --skip line return
+  ppm:read("*l")
+  --read the data
+  local data = ppm:read("*a")
+  ppm:close()
+  return data, width, height
 end
 
 local function computeHistogram(data)
@@ -156,16 +152,16 @@ local function analyze(photo, progress)
   local median = nil
   local requestError = nil
   while median == nil do
-    print(currentFilename.." requesting...")
+    log:tracef("%s requesting...", currentFilename)
     local thumb = photo:requestJpegThumbnail(200, 200, function(data, errorMsg)
       if data == nil then
-        print(errorMsg)
+        log:trace(errorMsg)
         requestError = errorMsg
       else
-        print(currentFilename.." processing...")
+        log:tracef("%s processing...", currentFilename)
         local histogram, total = computeHistogram(decodeJpeg(data))
         median = computePercentile(histogram, total, percentile)
-        print(currentFilename..": "..tostring(median))
+        log:tracef("%s: %d", currentFilename, median)
       end
     end)
     local timeout = 0
@@ -189,33 +185,20 @@ local function analyze(photo, progress)
   end
 end
 
-local function deflick(context)
-  print("deflick started")
-  LrDialogs.attachErrorDialogToFunctionContext(context)
-  local catalog = LrApplication.activeCatalog();
-  local selection = catalog:getTargetPhotos();
-  local count = #selection
-  local max_iterations = 20
-  assert(count > 2, "Not enough photos selected")
+local function deflickRange(range, catalog, progress, startIndex, totalCount)
+  local count = #range
+  local startValue = analyze(range[1], progress)
+  local endValue = analyze(range[count], progress)
+  progress:setPortionComplete(startIndex, totalCount)
   
-  local progress = LrProgressScope { title="Deflick", functionContext = context }
-  
-  LrApplicationView.switchToModule("develop")
-  
-  local startMedian = analyze(selection[1], progress)
-  progress:setPortionComplete(1, count)
-  
-  local endMedian = analyze(selection[#selection], progress)
-  progress:setPortionComplete(2, count)
-  
-  for i,photo in ipairs(selection) do
+  for i,photo in ipairs(range) do
     if i ~= 1 and i ~= count then
       local lastComputed = -1
       local currentFilename = photo:getFormattedMetadata("fileName")
       catalog:setSelectedPhotos(photo,{})
-      local target = startMedian + (endMedian - startMedian) * (i / count)
+      local target = startValue + (endValue - startValue) * (i / count)
       for iteration = 1, max_iterations, 1 do
-        print(currentFilename.." Iteration: "..tostring(iteration))
+        log:tracef("%s Iteration: %d", currentFilename, iteration)
         local computed = analyze(photo, progress)
         --if the computed doesn't change, we might need to try again
         local maxRetry = 10
@@ -226,7 +209,7 @@ local function deflick(context)
         end
         --if the computed still doesn't change, don't try to change exposure
         if computed ~= lastComputed then
-          print(currentFilename.." Correction: "..tostring(computed).." -> "..tostring(target))
+          log:tracef("%s Correction: %f -> %f", currentFilename, computed, target)
           lastComputed = computed
           if math.abs(target - computed) > deflickerThreshold then
             local offset = nil
@@ -237,27 +220,53 @@ local function deflick(context)
               maxRetry = maxRetry - 1
             end
             if offset == nil then offset = 0 end
-            local target = startMedian + (endMedian - startMedian) * (i / count)
+            local target = startValue + (endValue - startValue) * (i / count)
             local ev = convertToEV(target) - convertToEV(computed) + offset
-            print(currentFilename.." Correction (ev): "..tostring(offset).." -> "..tostring(ev))
+            log:tracef("%s Correction (ev): %f -> %f", currentFilename, offset, ev)
             LrDevelopController.setValue("Exposure", ev)
           else
-            print(currentFilename.." Finished")
+            log:tracef("%s Finished", currentFilename)
             break
           end
         else
-            print(currentFilename.." Preview did not update, re-trying")
+            log:tracef("%s Preview did not update, re-trying", currentFilename)
         end
         if progress:isCanceled() then LrErrors.throwCanceled() end
       end
     end
-    progress:setPortionComplete(i + 1, count)
+    progress:setPortionComplete(startIndex + i, totalCount)
+  end
+end
+
+local function deflick(context)
+  log:trace("deflick started")
+  LrDialogs.attachErrorDialogToFunctionContext(context)
+  local catalog = LrApplication.activeCatalog();
+  local selection = catalog:getTargetPhotos();
+  local count = #selection
+  assert(count > 2, "Not enough photos selected")
+  
+  local progress = LrProgressScope { title="Deflick", functionContext = context }
+  
+  LrApplicationView.switchToModule("develop")
+  
+  local range = {}
+  local lastStartIndex = 1
+  
+  for i,photo in ipairs(selection) do
+    if i == count or photo:getRawMetadata("rating") == 1 then
+      range[#range + 1] = photo
+      deflickRange(range, catalog, progress, lastStartIndex, count)
+      lastStartIndex = i
+      range = {}
+    end
+    range[#range + 1] = photo
   end
   
   --restore selection
   catalog:setSelectedPhotos(selection[1],selection)
   progress:done()
-  print("deflick finished")
+  log:trace("deflick finished")
 end
 
 LrFunctionContext.postAsyncTaskWithContext("deflick", deflick)
